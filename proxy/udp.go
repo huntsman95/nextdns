@@ -121,7 +121,7 @@ func (p Proxy) serveUDP(l net.PacketConn, inflightRequests chan struct{}) error 
 			if err != nil {
 				// Malformed query: reply with FORMERR and skip upstream resolution.
 				rsize = replyRCode(dnsmessage.RCodeFormatError, q, rbuf)
-				_, _, werr := c.WriteMsgUDP(rbuf[:rsize], oobWithSrc(lip), raddr)
+				werr := writeUDP(c, rbuf[:rsize], lip, raddr)
 				if werr != nil && err == nil {
 					err = werr
 				}
@@ -146,25 +146,13 @@ func (p Proxy) serveUDP(l net.PacketConn, inflightRequests chan struct{}) error 
 				}
 				rbuf[2] |= 0x2 // mark response as truncated
 			}
-			_, _, werr := c.WriteMsgUDP(rbuf[:rsize], oobWithSrc(lip), raddr)
+			werr := writeUDP(c, rbuf[:rsize], lip, raddr)
 			if err == nil {
 				// Do not overwrite resolve error when on cache fallback.
 				err = werr
 			}
 		}(bp, qsize, lip, raddr, start)
 	}
-}
-
-// readUDP reads from c to buf and returns the local and remote addresses.
-func readUDP(c *net.UDPConn, buf []byte) (n int, lip net.IP, raddr *net.UDPAddr, err error) {
-	var oobn int
-	oob := make([]byte, udpOOBSize)
-	n, oobn, _, raddr, err = c.ReadMsgUDP(buf, oob)
-	if err != nil {
-		return -1, nil, nil, err
-	}
-	lip = parseDstFromOOB(oob[:oobn])
-	return n, lip, raddr, nil
 }
 
 // oobWithSrc returns oob data with the Dst set with ip.

@@ -8,7 +8,7 @@ import (
 
 func listen(addr string) (net.Listener, error) {
 	return winio.ListenPipe(`\\.\pipe\`+addr, &winio.PipeConfig{
-		SecurityDescriptor: "O:SYD:P(A;;GA;;;WD)",
+		SecurityDescriptor: "D:P(A;;GA;;;WD)",
 	})
 }
 

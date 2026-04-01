@@ -128,6 +128,57 @@ func TestProfiles_GetWithUser(t *testing.T) {
 	}
 }
 
+func TestProfiles_GetWithContext_Name(t *testing.T) {
+	var ps Profiles
+	for _, def := range []string{
+		`"HOME-PC"=name-profile`,
+		"default-profile",
+	} {
+		if err := ps.Set(def); err != nil {
+			t.Fatalf("Profiles.Set(%s) = Err %v", def, err)
+		}
+	}
+
+	tests := []struct {
+		name       string
+		deviceName []string
+		want       string
+	}{
+		{name: "short name", deviceName: []string{"home-pc"}, want: "name-profile"},
+		{name: "local fqdn", deviceName: []string{"home-pc.local."}, want: "name-profile"},
+		{name: "custom fqdn", deviceName: []string{"home-pc.example.lan."}, want: "name-profile"},
+		{name: "no match", deviceName: []string{"other-pc"}, want: "default-profile"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ps.GetWithContext(net.ParseIP("10.0.0.2"), net.ParseIP("10.0.0.1"), nil, "", tt.deviceName); got != tt.want {
+				t.Fatalf("Profiles.GetWithContext() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	if got := ps.Get(net.ParseIP("10.0.0.2"), net.ParseIP("10.0.0.1"), nil); got != "default-profile" {
+		t.Fatalf("Profiles.Get() = %v, want %v", got, "default-profile")
+	}
+}
+
+func TestProfiles_GetWithContext_FullName(t *testing.T) {
+	var ps Profiles
+	for _, def := range []string{
+		`"home-pc.example.lan"=fqdn-profile`,
+		`"HOME-PC"=short-profile`,
+		"default-profile",
+	} {
+		if err := ps.Set(def); err != nil {
+			t.Fatalf("Profiles.Set(%s) = Err %v", def, err)
+		}
+	}
+
+	if got := ps.GetWithContext(net.ParseIP("10.0.0.2"), nil, nil, "", []string{"home-pc.example.lan."}); got != "fqdn-profile" {
+		t.Fatalf("Profiles.GetWithContext() = %v, want %v", got, "fqdn-profile")
+	}
+}
+
 func TestProfiles_Set_ReplacesUserRule(t *testing.T) {
 	var ps Profiles
 	if err := ps.Set("@rs=profile1"); err != nil {
@@ -141,5 +192,21 @@ func TestProfiles_Set_ReplacesUserRule(t *testing.T) {
 	}
 	if got := ps.GetWithUser(nil, nil, nil, "rs"); got != "profile2" {
 		t.Fatalf("Profiles.GetWithUser() = %v, want %v", got, "profile2")
+	}
+}
+
+func TestProfiles_Set_ReplacesNameRule(t *testing.T) {
+	var ps Profiles
+	if err := ps.Set(`"HOME-PC"=profile1`); err != nil {
+		t.Fatalf("Profiles.Set() = Err %v", err)
+	}
+	if err := ps.Set(`"home-pc"=profile2`); err != nil {
+		t.Fatalf("Profiles.Set() = Err %v", err)
+	}
+	if got, want := len(ps), 1; got != want {
+		t.Fatalf("len(Profiles) = %d, want %d", got, want)
+	}
+	if got := ps.GetWithContext(nil, nil, nil, "", []string{"home-pc.local."}); got != "profile2" {
+		t.Fatalf("Profiles.GetWithContext() = %v, want %v", got, "profile2")
 	}
 }

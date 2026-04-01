@@ -107,6 +107,13 @@ func (c *Config) flagSet(cmd string) flagSet {
 			"  to all hosts behind this interface.\n"+
 			"* @alice=abcdef: On macOS, Windows and Linux (systemd-logind), the\n"+
 			"  active interactive user can be used to pick a profile for localhost requests.\n"+
+			"* \"HOME-PC\"=abcdef: A quoted device name can be used to restrict a\n"+
+			"  profile to clients whose discovered name matches. Matching is case\n"+
+			"  insensitive and unqualified names also match discovered FQDNs such\n"+
+			"  as HOME-PC.local. or HOME-PC.example.lan.\n"+
+			"\n"+
+			"Discovered names use the same client discovery sources as client\n"+
+			"reporting, including -discovery-dns when it is set.\n"+
 			"\n"+
 			"This parameter can be repeated. The first match wins.")
 	fs.Var(&c.Forwarders, "forwarder",

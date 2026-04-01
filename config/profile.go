@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 )
 
@@ -14,6 +15,7 @@ type profile struct {
 	MAC     net.HardwareAddr
 	DestIPs []net.IP
 	User    string
+	Name    string
 }
 
 // newConfig parses a configuration id with an optional condition.
@@ -46,6 +48,12 @@ func newConfig(v string) (profile, error) {
 				Mask: net.CIDRMask(128, 128),
 			}
 		}
+	} else if strings.HasPrefix(cond, `"`) {
+		name, err := strconv.Unquote(cond)
+		if err != nil || name == "" {
+			return profile{}, fmt.Errorf("%s: invalid device name condition format", cond)
+		}
+		c.Name = normalizeProfileName(name)
 	} else if mac, err := net.ParseMAC(cond); err == nil {
 		c.MAC = mac
 	} else if iface, _ := net.InterfaceByName(cond); iface != nil {
@@ -62,7 +70,7 @@ func newConfig(v string) (profile, error) {
 }
 
 // Match returns true if the rule matches ip or interface and mac.
-func (p profile) Match(sourceIP, destIP net.IP, mac net.HardwareAddr, user string) bool {
+func (p profile) Match(sourceIP, destIP net.IP, mac net.HardwareAddr, user string, names []string) bool {
 	if p.User != "" {
 		if user == "" {
 			return false
@@ -70,6 +78,9 @@ func (p profile) Match(sourceIP, destIP net.IP, mac net.HardwareAddr, user strin
 		if p.User != user {
 			return false
 		}
+	}
+	if p.Name != "" && !matchProfileName(p.Name, names) {
+		return false
 	}
 	if p.Prefix != nil {
 		if sourceIP == nil {
@@ -102,12 +113,15 @@ func (p profile) Match(sourceIP, destIP net.IP, mac net.HardwareAddr, user strin
 }
 
 func (p profile) isDefault() bool {
-	return p.Prefix == nil && len(p.MAC) == 0 && len(p.DestIPs) == 0 && p.User == ""
+	return p.Prefix == nil && len(p.MAC) == 0 && len(p.DestIPs) == 0 && p.User == "" && p.Name == ""
 }
 
 func (p profile) String() string {
 	if p.User != "" {
 		return fmt.Sprintf("@%s=%s", p.User, p.ID)
+	}
+	if p.Name != "" {
+		return fmt.Sprintf("%s=%s", strconv.Quote(p.Name), p.ID)
 	}
 	if p.MAC != nil {
 		return fmt.Sprintf("%s=%s", p.MAC, p.ID)
@@ -123,18 +137,23 @@ type Profiles []profile
 
 // Get returns the configuration matching the ip and mac conditions.
 func (ps *Profiles) Get(sourceIP, destIP net.IP, mac net.HardwareAddr) string {
-	return ps.get(sourceIP, destIP, mac, "")
+	return ps.get(sourceIP, destIP, mac, "", nil)
 }
 
 // GetWithUser returns the configuration matching ip, mac and user conditions.
 func (ps *Profiles) GetWithUser(sourceIP, destIP net.IP, mac net.HardwareAddr, user string) string {
-	return ps.get(sourceIP, destIP, mac, user)
+	return ps.get(sourceIP, destIP, mac, user, nil)
 }
 
-func (ps *Profiles) get(sourceIP, destIP net.IP, mac net.HardwareAddr, user string) string {
+// GetWithContext returns the configuration matching ip, mac, user and discovered device names.
+func (ps *Profiles) GetWithContext(sourceIP, destIP net.IP, mac net.HardwareAddr, user string, deviceNames []string) string {
+	return ps.get(sourceIP, destIP, mac, user, deviceNames)
+}
+
+func (ps *Profiles) get(sourceIP, destIP net.IP, mac net.HardwareAddr, user string, deviceNames []string) string {
 	var def string
 	for _, p := range *ps {
-		if p.Match(sourceIP, destIP, mac, user) {
+		if p.Match(sourceIP, destIP, mac, user, deviceNames) {
 			if p.isDefault() {
 				def = p.ID
 				continue
@@ -148,6 +167,15 @@ func (ps *Profiles) get(sourceIP, destIP net.IP, mac net.HardwareAddr, user stri
 func (ps *Profiles) HasUserRules() bool {
 	for _, p := range *ps {
 		if p.User != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (ps *Profiles) HasDeviceNameRules() bool {
+	for _, p := range *ps {
+		if p.Name != "" {
 			return true
 		}
 	}
@@ -179,10 +207,11 @@ func (ps *Profiles) Set(value string) error {
 	// Replace if c match the same criteria of an existing config
 	for i, _p := range *ps {
 		if (p.User != "" && p.User == _p.User) ||
+			(p.Name != "" && p.Name == _p.Name) ||
 			(p.MAC != nil && _p.MAC != nil && bytes.Equal(p.MAC, _p.MAC)) ||
 			(p.DestIPs != nil && _p.DestIPs != nil && ipListEqual(p.DestIPs, _p.DestIPs)) ||
 			(p.Prefix != nil && _p.Prefix != nil && p.Prefix.String() == _p.Prefix.String()) ||
-			(p.MAC == nil && p.Prefix == nil && p.DestIPs == nil && p.User == "" && _p.MAC == nil && _p.Prefix == nil && _p.DestIPs == nil && _p.User == "") {
+			(p.MAC == nil && p.Prefix == nil && p.DestIPs == nil && p.User == "" && p.Name == "" && _p.MAC == nil && _p.Prefix == nil && _p.DestIPs == nil && _p.User == "" && _p.Name == "") {
 			(*ps)[i] = p
 			return nil
 		}
@@ -201,4 +230,32 @@ func ipListEqual(a, b []net.IP) bool {
 		}
 	}
 	return true
+}
+
+func normalizeProfileName(name string) string {
+	name = strings.TrimSpace(name)
+	name = strings.TrimSuffix(name, ".")
+	return strings.ToLower(name)
+}
+
+func matchProfileName(rule string, names []string) bool {
+	if rule == "" || len(names) == 0 {
+		return false
+	}
+	matchShort := !strings.Contains(rule, ".")
+	for _, name := range names {
+		candidate := normalizeProfileName(name)
+		if candidate == "" {
+			continue
+		}
+		if candidate == rule {
+			return true
+		}
+		if matchShort {
+			if label, _, ok := strings.Cut(candidate, "."); ok && label == rule {
+				return true
+			}
+		}
+	}
+	return false
 }

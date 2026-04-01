@@ -308,24 +308,6 @@ func run(args []string) error {
 	p.resolver.DNS53.MaxTTL = maxTTL
 	p.resolver.DOH.MaxTTL = maxTTL
 
-	if len(c.Profile) == 0 || (len(c.Profile) == 1 && c.Profile.Get(nil, nil, nil) != "") {
-		// Optimize for no dynamic configuration.
-		profileID := c.Profile.Get(nil, nil, nil)
-		profileURL := "https://dns.nextdns.io/" + profileID
-		p.resolver.DOH.GetProfileURL = func(q query.Query) (string, string) {
-			return profileURL, profileID
-		}
-	} else {
-		hasUserRules := c.Profile.HasUserRules()
-		p.resolver.DOH.GetProfileURL = func(q query.Query) (string, string) {
-			profileID := c.Profile.Get(q.PeerIP, q.LocalIP, q.MAC)
-			if hasUserRules && q.PeerIP.IsLoopback() {
-				profileID = c.Profile.GetWithUser(q.PeerIP, q.LocalIP, q.MAC, host.ActiveUser())
-			}
-			return "https://dns.nextdns.io/" + profileID, profileID
-		}
-	}
-
 	p.Proxy = proxy.Proxy{
 		Addrs:               c.Listens,
 		Upstream:            p.resolver,
@@ -339,45 +321,43 @@ func run(args []string) error {
 		p.Proxy.LocalResolver = discovery.Resolver{discoverHosts}
 	}
 	localhostMode := isLocalhostMode(&c)
-	if c.ReportClientInfo {
-		// Only enable discovery if configured to listen to requests outside
-		// the local host or if setup router is on.
-		enableDiscovery := !localhostMode
-		var r discovery.Resolver
-		if enableDiscovery {
-			discoverDHCP := &discovery.DHCP{OnError: func(err error) { log.Errorf("dhcp: %v", err) }}
-			discoverDNS := &discovery.DNS{Upstream: c.DiscoveryDNS}
-			var discoverMDNS discovery.Source = discovery.Dummy{}
-			if c.MDNS != "disabled" {
-				mdns := &discovery.MDNS{OnError: func(err error) { log.Errorf("mdns: %v", err) }}
-				discoverMDNS = mdns
-				p.OnInit = append(p.OnInit, func(ctx context.Context) {
-					log.Info("Starting mDNS discovery")
-					if err := mdns.Start(ctx, c.MDNS); err != nil {
-						log.Errorf("Cannot start mDNS: %v", err)
-					}
-				})
-			}
-			discoveryResolver := discovery.Resolver{discoverMDNS, discoverDHCP}
-			if c.DiscoveryDNS != "" {
-				// Only include discovery DNS as discovery resolver if
-				// explicitly specified as auto-discovered DNS discovery can
-				// create loops.
-				discoveryResolver = append(discovery.Resolver{discoverDNS}, discoveryResolver...)
-			}
-			p.Proxy.DiscoveryResolver = discoveryResolver
-			r = discovery.Resolver{
-				discoverHosts,
-				&discovery.Merlin{},
-				&discovery.Ubios{},
-				&discovery.Firewalla{},
-				discoverMDNS,
-				discoverDHCP,
-				discoverDNS,
-			}
+	hasUserRules := c.Profile.HasUserRules()
+	hasDeviceNameRules := c.Profile.HasDeviceNameRules()
+	var clientDiscovery discovery.Resolver
+	if !localhostMode && (c.ReportClientInfo || hasDeviceNameRules) {
+		discoverDHCP := &discovery.DHCP{OnError: func(err error) { log.Errorf("dhcp: %v", err) }}
+		discoverDNS := &discovery.DNS{Upstream: c.DiscoveryDNS}
+		var discoverMDNS discovery.Source = discovery.Dummy{}
+		if c.MDNS != "disabled" {
+			mdns := &discovery.MDNS{OnError: func(err error) { log.Errorf("mdns: %v", err) }}
+			discoverMDNS = mdns
+			p.OnInit = append(p.OnInit, func(ctx context.Context) {
+				log.Info("Starting mDNS discovery")
+				if err := mdns.Start(ctx, c.MDNS); err != nil {
+					log.Errorf("Cannot start mDNS: %v", err)
+				}
+			})
+		}
+		discoveryResolver := discovery.Resolver{discoverMDNS, discoverDHCP}
+		if c.DiscoveryDNS != "" {
+			// Only include discovery DNS as discovery resolver if explicitly
+			// specified as auto-discovered DNS discovery can create loops.
+			discoveryResolver = append(discovery.Resolver{discoverDNS}, discoveryResolver...)
+		}
+		p.Proxy.DiscoveryResolver = discoveryResolver
+		clientDiscovery = discovery.Resolver{
+			discoverHosts,
+			&discovery.Merlin{},
+			&discovery.Ubios{},
+			&discovery.Firewalla{},
+			discoverMDNS,
+			discoverDHCP,
+			discoverDNS,
+		}
+		if c.ReportClientInfo {
 			ctl.Command("discovered", func(data any) any {
 				d := map[string]map[string][]string{}
-				r.Visit(func(source, name string, addrs []string) {
+				clientDiscovery.Visit(func(source, name string, addrs []string) {
 					if d[source] == nil {
 						d[source] = map[string][]string{}
 					}
@@ -386,7 +366,34 @@ func run(args []string) error {
 				return d
 			})
 		}
-		setupClientReporting(p, &c.Profile, r)
+	}
+
+	if len(c.Profile) == 0 || (len(c.Profile) == 1 && c.Profile.Get(nil, nil, nil) != "") {
+		// Optimize for no dynamic configuration.
+		profileID := c.Profile.Get(nil, nil, nil)
+		profileURL := "https://dns.nextdns.io/" + profileID
+		p.resolver.DOH.GetProfileURL = func(q query.Query) (string, string) {
+			return profileURL, profileID
+		}
+	} else {
+		p.resolver.DOH.GetProfileURL = func(q query.Query) (string, string) {
+			var user string
+			if hasUserRules && q.PeerIP.IsLoopback() {
+				user = host.ActiveUser()
+			}
+			var deviceNames []string
+			if hasDeviceNameRules {
+				deviceNames = profileNamesForQuery(clientDiscovery, q)
+			}
+			profileID := c.Profile.GetWithContext(q.PeerIP, q.LocalIP, q.MAC, user, deviceNames)
+			return "https://dns.nextdns.io/" + profileID, profileID
+		}
+	}
+
+	if c.ReportClientInfo {
+		// Only enable discovery if configured to listen to requests outside
+		// the local host or if setup router is on.
+		setupClientReporting(p, &c.Profile, clientDiscovery)
 	}
 	if p.Proxy.DiscoveryResolver == nil && c.DiscoveryDNS != "" {
 		p.Proxy.DiscoveryResolver = &discovery.DNS{Upstream: c.DiscoveryDNS}
@@ -700,6 +707,38 @@ func normalizeName(names []string) string {
 		name = name[:idx] // remove .local. suffix
 	}
 	return name
+}
+
+func profileNamesForQuery(r discovery.Resolver, q query.Query) []string {
+	if len(r) == 0 || q.PeerIP == nil || q.PeerIP.IsLoopback() {
+		return nil
+	}
+	var names []string
+	names = appendUniqueStrings(names, r.LookupAddr(q.PeerIP.String()))
+	if q.MAC == nil {
+		return names
+	}
+	names = appendUniqueStrings(names, r.LookupMAC(q.MAC.String()))
+	if ip := clientIPFromMAC(q.MAC, q.PeerIP); ip != nil {
+		names = appendUniqueStrings(names, r.LookupAddr(ip.String()))
+	}
+	return names
+}
+
+func appendUniqueStrings(dst, src []string) []string {
+	for _, value := range src {
+		seen := false
+		for _, existing := range dst {
+			if existing == value {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			dst = append(dst, value)
+		}
+	}
+	return dst
 }
 
 func clientIPFromMAC(mac net.HardwareAddr, currentIP net.IP) net.IP {
